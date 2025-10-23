@@ -18,30 +18,46 @@ rand_seed = randi([1 2^31-1], 1, 1);
 cfg.nphoton=1e7;    %2e9;
 
 %== Define simulated domain volume (3D array of labels or floating point numbers)
-% define a 1cm radius sphere within a 6x6x6 cm box with a 0.5mm resolution
+% Assign a unique label to every depth slice. This enables the post-processing
+% step to recover depth-resolved photon contributions using the partial path
+% length information recorded by MCX.
 dimx=200;
 dimy=200;
-dimz=60; % in mm
-[xi,yi,zi]=meshgrid(1:dimx,1:dimy,1:dimz);
+dimz=60; % in mm because cfg.unitinmm = 1 mm
 
-cfg.vol=3*ones(size(xi)); % set to deep medium index
 cfg.unitinmm=1; % define pixel size in terms of mm
 
-%厚さ...光学ファントムmm ,皮下組織4mm
-phantom_th=50; idx_z_phantom=1:floor(phantom_th/cfg.unitinmm);
-skin_th=4; idx_z_skin=(1+floor(phantom_th/cfg.unitinmm)):((phantom_th+skin_th)/cfg.unitinmm);
+depth_bin_mm = cfg.unitinmm; % 1 mm resolution
+depth_centers = ((1:dimz) - 0.5) * depth_bin_mm;
 
-cfg.vol(:,:,idx_z_phantom)=1;
-cfg.vol(:,:,idx_z_skin)=2;
+phantom_th = 50; % mm
+skin_th = 4; % mm
 
-%== Define optical properties for each tissue label
-%         [mua吸収係数(1/mm) mus減衰散乱係数(1/mm)  g    n]
+phantom_prop = [0.0138 1.02 0.01 1.37];
+skin_prop    = [0.0204 1.34 0.01 1.37];
+muscle_prop  = [0.0255 0.92 0.01 1.37];
 
-cfg.prop=[0 0 1 1          % medium 0: the environment
-    0.0138 1.02 0.01 1.37     % medium 1: 光学ファントム
-    0.0204 1.34 0.01 1.37     % medium 1: 皮膚、中林さん修論参照、平均値を用いた
-    0.0255 0.92 0.01 1.37];   % medium 2: 筋組織、中林さん修論参照、平均値を用いた
-	
+cfg.vol = zeros(dimx, dimy, dimz, 'uint16');
+cfg.prop = zeros(dimz+1, 4);
+cfg.prop(1,:) = [0 0 1 1];
+
+DV_depth = zeros(1, dimz);
+
+for z_idx = 1:dimz
+    cfg.vol(:,:,z_idx) = z_idx; % assign label per depth slice
+    current_depth = depth_centers(z_idx);
+
+    if current_depth <= phantom_th
+        cfg.prop(z_idx+1,:) = phantom_prop;
+        DV_depth(z_idx) = 0; % default: static phantom
+    elseif current_depth <= phantom_th + skin_th
+        cfg.prop(z_idx+1,:) = skin_prop;
+        DV_depth(z_idx) = 1e-8;
+    else
+        cfg.prop(z_idx+1,:) = muscle_prop;
+        DV_depth(z_idx) = 5e-6;
+    end
+end
 
 %== Define source position (in grid-unit, not in mm unit!)[x y z]
 cfg.srcpos=[100,80,0];
@@ -64,8 +80,8 @@ cfg.detpos=[100 100 0 1.5; 100 110 0 1.5;100 120 0 1.5]; % [x,y,z,radius] (mm? g
 
 %== Define output structure
 % d: detector id; s: scattering event count; p: partial path length
-% x: exit position; v: exit direction
-cfg.savedetflag = 'dspm';
+% m: momentum direction; w: detected photon weight
+cfg.savedetflag = 'dspmw';
 
 numdet=size(cfg.detpos,1);
 for det_idx=1:numdet,
@@ -102,7 +118,7 @@ assumed_beta=0.5;
 
 % DV=[1e-6 1e-8 5e-6]; % BFi for [血流の流れていない光学ファントム>>0 皮下組織 筋組織] in units of mm^2/savedetflag
 %DV=[1e-6 1e-8 5e-6];
-DV=[0 1e-8 5e-6];
+DV=DV_depth;
 
 
 [mtau,g1]=generate_g1_mcxlab(cfg,detpos,mtau,disp_model,DV,lambda);
@@ -146,7 +162,7 @@ legend(arrayfun(@(r)sprintf('\\rho = %.0f mm', r), sdsep, 'UniformOutput', false
        'Location', 'best');
 
 % --- タイトル（各層のBFi設定値を表示） ---
-title([num2str(DV*1e6), '   [×10^{-6} mm^2/s]']);
+title('Simulated g_2(\tau) for each source-detector separation');
 
 % --- テキスト表示（推定BFi値をρごとに表示） ---
 text(2e-3, 1.35, 'BFI (×10^{-7} mm^2/s)', 'FontSize', 12);
@@ -157,6 +173,37 @@ for i = 1:numdet
         'FontSize', 11);
 end
 
+set(gca,'FontSize',12);
+
+
+%% ===== 深さごとの寄与度計算 =====
+[depth_mm, depth_contribution] = compute_depth_bfi_contribution(detpos, cfg);
+
+% 興味のある深さ (mm)
+target_depths = [15 30];
+
+for det_idx = 1:numdet
+    fprintf('--- Detector separation %.0f mm ---\n', sdsep(det_idx));
+    for td = target_depths
+        [~, nearest_idx] = min(abs(depth_mm - td));
+        fprintf('  Depth %.1f mm: %.2f %% contribution\n', ...
+            depth_mm(nearest_idx), depth_contribution(det_idx, nearest_idx)*100);
+    end
+end
+
+% プロット: 深さごとの寄与率
+figure;
+hold on;
+for det_idx = 1:numdet
+    plot(depth_mm, depth_contribution(det_idx,:)*100, 'LineWidth', 1.5, ...
+        'DisplayName', sprintf('\\rho = %.0f mm', sdsep(det_idx)));
+end
+hold off;
+xlabel('Depth (mm)');
+ylabel('Contribution to detected BFi (%)');
+title('Depth-wise photon contribution to BFi');
+legend('Location','best');
+grid on;
 set(gca,'FontSize',12);
 
 
