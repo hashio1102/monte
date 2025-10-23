@@ -2,6 +2,13 @@
 close all
 clear all
 
+% Ensure helper functions located alongside this script remain on the MATLAB
+% path even after changing directories for MCX executables.
+script_dir = fileparts(mfilename('fullpath'));
+if ~isempty(script_dir) && exist(script_dir, 'dir')
+    addpath(script_dir);
+end
+
 % path_to_MCX='/autofs/space/oxm_002/users/MCX19Workshop_DoNotModify/Software/linux64/MCXStudio'; %% PUT YOUR OWN PATH HERE
 % you need to set path to MCXStudio as well as iso2mesh toolbox -- added by Yumie 2022 Aug
 addpath(genpath("C:\monte_re\MCXStudio2025\MATLAB\iso2mesh")); %% PUT YOUR OWN PATH HERE
