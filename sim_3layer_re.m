@@ -30,19 +30,53 @@ cfg.nphoton=1e7;    %2e9;
 % length information recorded by MCX.
 dimx=200;
 dimy=200;
-dimz=60; % in mm because cfg.unitinmm = 1 mm
 
 cfg.unitinmm=1; % define pixel size in terms of mm
+
+% Three-layer structure: phantom (top), skin (middle), muscle (bottom)
+phantom_thickness_mm = 50;
+skin_thickness_mm    = 4;
+muscle_thickness_mm  = 6;
+
+desired_total_depth_mm = phantom_thickness_mm + skin_thickness_mm + muscle_thickness_mm;
+dimz = round(desired_total_depth_mm / cfg.unitinmm);
+total_depth_mm = dimz * cfg.unitinmm;
+% Recompute muscle thickness after rounding the grid depth so that the total
+% thickness exactly matches the discrete simulation domain.
+muscle_thickness_mm = total_depth_mm - (phantom_thickness_mm + skin_thickness_mm);
+if muscle_thickness_mm <= 0
+    error('Total depth must be greater than the sum of phantom and skin thickness to include a muscle layer.');
+end
 
 depth_bin_mm = cfg.unitinmm; % 1 mm resolution
 depth_centers = ((1:dimz) - 0.5) * depth_bin_mm;
 
-phantom_th = 50; % mm
-skin_th = 4; % mm
+layer_defs = struct( ...
+    'name',      {"phantom",          "skin",            "muscle"}, ...
+    'thickness', {phantom_thickness_mm, skin_thickness_mm, muscle_thickness_mm}, ...
+    'optprop',   {[0.0138 1.02 0.01 1.37], ...
+                  [0.0204 1.34 0.01 1.37], ...
+                  [0.0255 0.92 0.01 1.37]}, ...
+    'bfi',       {0, 1e-8, 5e-6});
 
-phantom_prop = [0.0138 1.02 0.01 1.37];
-skin_prop    = [0.0204 1.34 0.01 1.37];
-muscle_prop  = [0.0255 0.92 0.01 1.37];
+layer_boundaries_mm = cumsum([layer_defs.thickness]);
+if layer_boundaries_mm(end) < total_depth_mm
+    % Extend the muscle layer if rounding caused a shortfall
+    layer_defs(end).thickness = layer_defs(end).thickness + (total_depth_mm - layer_boundaries_mm(end));
+    layer_boundaries_mm = cumsum([layer_defs.thickness]);
+end
+
+layer_interface_depths_mm = layer_boundaries_mm(1:end-1);
+layer_summary_text = strjoin(arrayfun(@(ld)sprintf('%s %.0f mm', ld.name, ld.thickness), layer_defs, ...
+    'UniformOutput', false), ', ');
+
+fprintf('Three-layer configuration (top to bottom):\n');
+for ld_idx = 1:numel(layer_defs)
+    props = layer_defs(ld_idx).optprop;
+    fprintf('  %d) %s: thickness = %.1f mm, mu_a = %.4f mm^{-1}, mu_s = %.2f mm^{-1}, g = %.2f, n = %.2f, BFi = %.2e mm^2/s\n', ...
+        ld_idx, layer_defs(ld_idx).name, layer_defs(ld_idx).thickness, ...
+        props(1), props(2), props(3), props(4), layer_defs(ld_idx).bfi);
+end
 
 cfg.vol = zeros(dimx, dimy, dimz, 'uint16');
 cfg.prop = zeros(dimz+1, 4);
@@ -54,16 +88,13 @@ for z_idx = 1:dimz
     cfg.vol(:,:,z_idx) = z_idx; % assign label per depth slice
     current_depth = depth_centers(z_idx);
 
-    if current_depth <= phantom_th
-        cfg.prop(z_idx+1,:) = phantom_prop;
-        DV_depth(z_idx) = 0; % default: static phantom
-    elseif current_depth <= phantom_th + skin_th
-        cfg.prop(z_idx+1,:) = skin_prop;
-        DV_depth(z_idx) = 1e-8;
-    else
-        cfg.prop(z_idx+1,:) = muscle_prop;
-        DV_depth(z_idx) = 5e-6;
+    layer_idx = find(current_depth <= layer_boundaries_mm, 1, 'first');
+    if isempty(layer_idx)
+        layer_idx = numel(layer_defs); % guard against numerical precision edge cases
     end
+
+    cfg.prop(z_idx+1,:) = layer_defs(layer_idx).optprop;
+    DV_depth(z_idx) = layer_defs(layer_idx).bfi;
 end
 
 %== Define source position (in grid-unit, not in mm unit!)[x y z]
@@ -169,7 +200,11 @@ legend(arrayfun(@(r)sprintf('\\rho = %.0f mm', r), sdsep, 'UniformOutput', false
        'Location', 'best');
 
 % --- タイトル（各層のBFi設定値を表示） ---
-title('Simulated g_2(\tau) for each source-detector separation');
+title(sprintf('Simulated g_2(\\tau) for three-layer model (%s)', layer_summary_text));
+
+layer_bfi_summary = strjoin(arrayfun(@(ld)sprintf('%s = %.1e', ld.name, ld.bfi), layer_defs, ...
+    'UniformOutput', false), ', ');
+text(2e-3, 1.38, ['Layer BFi: ' layer_bfi_summary], 'FontSize', 11);
 
 % --- テキスト表示（推定BFi値をρごとに表示） ---
 text(2e-3, 1.35, 'BFI (×10^{-7} mm^2/s)', 'FontSize', 12);
@@ -269,7 +304,7 @@ for det_index = 1:numdet
     caxis([-10 0]);
     colorbar;
     xlim([50 150]);
-    ylim([0 60]);
+    ylim([0 total_depth_mm]);
     xlabel('y [mm]');
     ylabel('z [mm]');
     rho = norm(cfg.srcpos - cfg.detpos(det_index,1:3));
@@ -277,8 +312,9 @@ for det_index = 1:numdet
 
     hold on;
     % --- 層境界ライン ---
-    yline(phantom_th,'w--','LineWidth',1.2);
-    yline(phantom_th+skin_th,'w--','LineWidth',1.2);
+    for boundary_depth = layer_interface_depths_mm
+        yline(boundary_depth,'w--','LineWidth',1.2);
+    end
 
     % --- Source / Detector ---
     src_y = cfg.srcpos(2) * cfg.unitinmm;
@@ -294,8 +330,8 @@ for det_index = 1:numdet
 end
 
 %sgtitle('PMDF (Y–Z section) for Detectors #1–3','FontWeight','bold','FontSize',13);
-sgtitle(sprintf('PMDF (Y–Z section) for Detectors #1–3   [phantom thickness = %.0f mm]', ...
-    phantom_th), ...
+sgtitle(sprintf('PMDF (Y–Z section) for Detectors #1–3   [three-layer model: %s]', ...
+    layer_summary_text), ...
     'FontWeight','bold','FontSize',13);
 
 
@@ -323,12 +359,13 @@ ylabel('z [mm]');
 title(sprintf('PMDF (\\rho = %.0f mm)', sdsep(idx_rho30)), 'FontWeight','bold');
 set(gca,'FontSize',12);
 xlim([50 150]);
-ylim([0 60]);
+ylim([0 total_depth_mm]);
 
 hold on;
-% --- 層境界ライン（いまの2層境界：phantom_th, phantom_th+skin_th）---
-yline(phantom_th,              'w--','LineWidth',1.2);
-yline(phantom_th + skin_th,    'w--','LineWidth',1.2);
+% --- 層境界ライン ---
+for boundary_depth = layer_interface_depths_mm
+    yline(boundary_depth, 'w--','LineWidth',1.2);
+end
 
 % --- Source / Detector 表示 ---
 src_y = cfg.srcpos(2) * cfg.unitinmm;
